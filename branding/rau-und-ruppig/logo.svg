@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="360" height="80" viewBox="0 0 360 80" role="img" aria-label="Rau und Ruppig – Arbeitskleidung">
+  <!-- Bildmarke: Sechskantmutter -->
+  <path d="M32 6 60 22.5v33L32 72 4 55.5v-33Z" fill="none" stroke="#1B1B18" stroke-width="6" stroke-linejoin="round"/>
+  <circle cx="32" cy="39" r="11" fill="none" stroke="#E8560C" stroke-width="6"/>
+  <!-- Wortmarke (benötigt Oswald Bold; für finale Druckdaten in Pfade wandeln) -->
+  <text x="80" y="46" font-family="Oswald, 'Arial Narrow', sans-serif" font-weight="700" font-size="38" letter-spacing="0.5" fill="#1B1B18">RAU<tspan fill="#E8560C">&amp;</tspan>RUPPIG</text>
+  <text x="82" y="68" font-family="Barlow, Arial, sans-serif" font-weight="600" font-size="12" letter-spacing="7" fill="#5F594D">ARBEITSKLEIDUNG</text>
+</svg>
