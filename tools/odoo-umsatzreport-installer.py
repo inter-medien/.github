@@ -285,6 +285,16 @@ for mv in env['account.move'].search([('move_type', 'in', ['out_invoice', 'out_r
     FAKT_L.append((mv.invoice_date, mv.name or '', rp.name if rp else '?',
                    mv.amount_untaxed_signed or 0.0, mv.payment_state or ''))
 
+# §45b wird nicht per Rechnung, sondern per Sammelabrechnung an die
+# Pflegekasse fakturiert (x_sammelabrechnung, Status final).
+for sa in env['x_sammelabrechnung'].search([('x_state', '=', 'final'),
+                                            ('x_erstellt_am', '>=', str(m_start)),
+                                            ('x_erstellt_am', '<', str(m_ende))]):
+    FAKT['pk45b'] += sa.x_summe_euro or 0.0
+    FAKT_L.append((sa.x_erstellt_am.date(), sa.x_name or 'Sammelabrechnung',
+                   'Pflegekasse (%d Belege)' % (sa.x_anzahl_belege or 0),
+                   sa.x_summe_euro or 0.0, 'sammel'))
+
 # --- Zeiterfassung des aktuellen Monats
 for l in env['account.analytic.line'].search([('date', '>=', str(m_start)),
                                               ('date', '<', str(m_ende)),
@@ -315,17 +325,29 @@ for l in env['account.analytic.line'].search([('date', '>=', str(m_start)),
         if kwnr == akt_kw:
             em['wi'] += l.unit_amount or 0.0
 
-# --- Vormonat: noch abzurechnen (Status offen)
+# --- Vormonat: noch abzurechnen
+# §45b: Nachweise des Vormonats, die noch in keiner Sammelabrechnung sind
+# (Status nicht eingereicht/invoiced), bewertet mit dem §45b-Satz.
+# Uebrige: erledigte Slots mit Status "abrechenbar (offen)".
 V = {'pk45b': 0.0, 'uebrige': 0.0}
+v_satz = 43.0 if v_start < datetime.date(2027, 1, 1) else 53.0
+v_nw_offen = 0
+v_nw_leer = 0
+for nw in env['x_pk_nachweis'].search([('x_monat', '=', str(vm)), ('x_jahr', '=', str(vj)),
+                                       ('x_state', 'not in', ['eingereicht', 'invoiced'])]):
+    std = nw.x_summe_stunden or 0.0
+    V['pk45b'] += std * v_satz
+    v_nw_offen += 1
+    if std < 0.01:
+        v_nw_leer += 1
 for s in env['planning.slot'].search([('start_datetime', '>=', str(v_start)),
                                       ('start_datetime', '<', str(m_start)),
                                       ('x_umsatz_status', '=', 'offen')]):
     if s.x_ist_erstgespraech or s.x_hr_leave_id:
         continue
-    d = s.start_datetime.date()
-    kl = 'pk45b' if (s.partner_id and s.partner_id.id in pk_pat) else 'uebrige'
-    satz = (43.0 if d < datetime.date(2027, 1, 1) else 53.0) if kl == 'pk45b' else 56.0
-    V[kl] += s.x_umsatz or ((s.allocated_hours or 0.0) * satz)
+    if s.partner_id and s.partner_id.id in pk_pat:
+        continue
+    V['uebrige'] += s.x_umsatz or ((s.allocated_hours or 0.0) * 56.0)
 
 # ================================================================ Zeilen
 KL_NAME = {'pk45b': '§45b', 'uebrige': 'Übrige Leistungen', 'gesamt': 'Gesamt'}
@@ -333,6 +355,12 @@ rows = []
 
 # Vormonat (oben)
 v_sum = V['pk45b'] + V['uebrige']
+v_hinw = {
+    'pk45b': ('%d Nachweise noch nicht in Sammelabrechnung (davon %d ohne Stunden)' % (v_nw_offen, v_nw_leer))
+             if v_nw_offen else 'Alle Nachweise in Sammelabrechnung eingereicht',
+    'uebrige': 'Erledigte Einsaetze ohne Rechnung (Slot-Status offen)' if V['uebrige'] > 0.005 else 'Alles fakturiert',
+    'gesamt': 'Offene Posten aus dem Vormonat',
+}
 for i, kl in enumerate(['pk45b', 'uebrige', 'gesamt']):
     betrag = v_sum if kl == 'gesamt' else V[kl]
     rows.append({
@@ -340,7 +368,7 @@ for i, kl in enumerate(['pk45b', 'uebrige', 'gesamt']):
         'x_monat_ym': vym, 'x_typ': 'vormonat', 'x_klasse': kl, 'x_sortier': i,
         'x_abrechenbar_eur': round(betrag, 2),
         'x_ampel': 'gelb' if betrag > 0.005 else 'gruen',
-        'x_hinweis': 'Slots mit Status "abrechenbar (offen)" – jetzt Rechnungen stellen' if betrag > 0.005 else 'Alles abgerechnet',
+        'x_hinweis': v_hinw[kl],
     })
 
 # Wochen
@@ -487,7 +515,7 @@ if env.context.get('umsatzreport_mail'):
         # --- Block 5: Einzelrechnungen des Monats
         ZAHL = {'paid': ('bezahlt', '#1b7a38'), 'in_payment': ('in Zahlung', '#1b7a38'),
                 'partial': ('teilbezahlt', '#b26a00'), 'not_paid': ('offen', '#b26a00'),
-                'reversed': ('storniert', '#c62828')}
+                'reversed': ('storniert', '#c62828'), 'sammel': ('Sammelabrechnung §45b', '#1f3a5f')}
         frows = ''
         for (fdat, fnr, fkunde, fbetrag, fstate) in FAKT_L:
             ztxt, zfarbe = ZAHL.get(fstate, (fstate, '#666666'))
@@ -497,7 +525,7 @@ if env.context.get('umsatzreport_mail'):
                       '<td' + TD + '>' + ('%.2f' % fbetrag).replace('.', ',') + ' €</td>'
                       '<td' + TDL + '><span style="color:' + zfarbe + ';">' + ztxt + '</span></td></tr>')
         if FAKT_L:
-            frechnungen = ('<h3' + H3 + '>5 · Rechnungen des Monats (' + str(len(FAKT_L)) + ')</h3>'
+            frechnungen = ('<h3' + H3 + '>5 · Rechnungen &amp; Sammelabrechnungen des Monats (' + str(len(FAKT_L)) + ')</h3>'
                            '<table style="border-collapse:collapse;font-size:13px;" cellspacing="0">'
                            '<tr><th' + TH + '>Datum</th><th' + TH + '>Nummer</th><th' + TH + '>Kunde</th>'
                            '<th' + THR + '>Netto</th><th' + TH + '>Zahlung</th></tr>' + frows + '</table>')
@@ -514,7 +542,9 @@ if env.context.get('umsatzreport_mail'):
             '<h3' + H3 + '>1 · Vormonat ' + MON[vm] + ' – noch abzurechnen</h3>'
             '<table style="border-collapse:collapse;font-size:13px;" cellspacing="0">'
             '<tr><th' + TH + '>Klasse</th><th' + THR + '>Offen</th></tr>' + vrows + '</table>'
-            + ('<p style="margin:4px 0 0;color:#b26a00;">&#9888; Diese Slots stehen auf „abrechenbar (offen)" – jetzt Rechnungen/Nachweise stellen.</p>' if v_sum > 0.005 else
+            + ('<p style="margin:4px 0 0;color:#b26a00;">&#9888; §45b: ' + str(v_nw_offen)
+               + ' Nachweise noch nicht in der Sammelabrechnung (davon ' + str(v_nw_leer)
+               + ' noch ohne Stunden) · Übrige: erledigte Einsätze ohne Rechnung.</p>' if v_sum > 0.005 else
                '<p style="margin:4px 0 0;color:#1b7a38;">Alles abgerechnet.</p>')
 
             + '<h3' + H3 + '>2 · Wochen im Detail (&#9654; = laufende Woche)</h3>'
@@ -537,7 +567,8 @@ if env.context.get('umsatzreport_mail'):
             '<th' + THR + '>Prognose Leistung</th><th' + THR + '>Fakturiert</th></tr>' + prows + '</table>'
             '<p style="margin:4px 0 0;color:#666;">Realisierungsquote ' + ('%.0f' % (quote * 100.0))
             + ' % (letzte 3 Monate) · Sätze: §45b 43 €/h bis 31.12.2026, 53 €/h ab 01.01.2027 · Übrige 56 €/h<br/>'
-            '<b>Fakturiert</b> = gebuchte Ausgangsrechnungen (abzgl. Gutschriften) mit Rechnungsdatum im Monat – '
+            '<b>Fakturiert</b> = gebuchte Ausgangsrechnungen (abzgl. Gutschriften) mit Rechnungsdatum im Monat, '
+            'für §45b die im Monat finalisierten Sammelabrechnungen an die Pflegekasse – '
             'darin steckt v. a. die Abrechnung des Vormonats und Umsatz ohne geplante Einsätze. '
             'Nicht mit der Prognose addieren (teilweise derselbe Umsatz).</p>'
 
