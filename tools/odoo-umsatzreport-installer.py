@@ -87,6 +87,7 @@ FIELDS = [
     ('x_plan_eur',         'float',     'Plan €', {}),
     ('x_abrechenbar_eur',  'float',     'Abrechenbar €', {}),
     ('x_prognose_eur',     'float',     'Prognose €', {}),
+    ('x_fakturiert_eur',   'float',     'Fakturiert € (RG-Datum im Monat)', {}),
     ('x_abw_h',            'float',     'Abwesenheit h', {}),
     ('x_ampel',            'selection', 'Ampel', {'selection': "[('gruen','OK'),('gelb','Prüfen'),('rot','Lücke')]"}),
     ('x_hinweis',          'char',      'Hinweis', {}),
@@ -266,6 +267,20 @@ for s in env['planning.slot'].search([('start_datetime', '>=', str(m_start)),
             else:
                 PROG[kl]['zukunft'] += eur
 
+# --- Fakturiert: gebuchte Ausgangsrechnungen (inkl. Gutschriften) mit
+# Rechnungsdatum im laufenden Monat – unabhängig von der Planung. Faengt
+# Umsatz, der ohne (geplante) Einsaetze fakturiert wird.
+FAKT = {'pk45b': 0.0, 'uebrige': 0.0}
+for mv in env['account.move'].search([('move_type', 'in', ['out_invoice', 'out_refund']),
+                                      ('state', '=', 'posted'),
+                                      ('invoice_date', '>=', str(m_start)),
+                                      ('invoice_date', '<', str(m_ende))]):
+    rp = mv.partner_id.commercial_partner_id if mv.partner_id else False
+    kl = 'uebrige'
+    if rp and (rp.id in pk_pat or any(c.id in pk_pat for c in rp.child_ids)):
+        kl = 'pk45b'
+    FAKT[kl] += mv.amount_untaxed_signed or 0.0
+
 # --- Zeiterfassung des aktuellen Monats
 for l in env['account.analytic.line'].search([('date', '>=', str(m_start)),
                                               ('date', '<', str(m_ende)),
@@ -385,17 +400,18 @@ for i, kl in enumerate(['pk45b', 'uebrige']):
         'x_name': 'Prognose %s · %s' % (ym, KL_NAME[kl]),
         'x_monat_ym': ym, 'x_typ': 'prognose', 'x_klasse': kl, 'x_sortier': 900 + i,
         'x_plan_eur': round(pr['plan'], 2), 'x_abrechenbar_eur': round(pr['abr'], 2),
-        'x_prognose_eur': round(prognose, 2),
+        'x_prognose_eur': round(prognose, 2), 'x_fakturiert_eur': round(FAKT[kl], 2),
         'x_ampel': 'gruen' if prognose >= pr['plan'] * 0.9 else 'gelb',
         'x_hinweis': hinw,
     })
+fakt_sum = FAKT['pk45b'] + FAKT['uebrige']
 rows.append({
     'x_name': 'Prognose %s · Gesamt' % ym,
     'x_monat_ym': ym, 'x_typ': 'prognose', 'x_klasse': 'gesamt', 'x_sortier': 902,
     'x_plan_eur': round(plan_sum, 2), 'x_abrechenbar_eur': round(abr_sum, 2),
-    'x_prognose_eur': round(prog_sum, 2),
+    'x_prognose_eur': round(prog_sum, 2), 'x_fakturiert_eur': round(fakt_sum, 2),
     'x_ampel': 'gruen' if prog_sum >= plan_sum * 0.9 else 'gelb',
-    'x_hinweis': 'Erwarteter Monatsumsatz (ohne Erstgespraeche, inkl. Abwesenheiten)',
+    'x_hinweis': 'Prognose = erwartete Leistung des Monats; Fakturiert = Rechnungen mit RG-Datum im Monat',
 })
 for r in rows:
     env['x_umsatzreport'].create(r)
@@ -450,16 +466,17 @@ if env.context.get('umsatzreport_mail'):
         if not erows:
             erows = '<tr><td' + TDL + ' colspan="7">Keine Daten</td></tr>'
 
-        # --- Block 4: Prognose
+        # --- Block 4: Prognose + Fakturiert
         prows = ''
-        for kl_label, pr in (('§45b', PROG['pk45b']), ('Übrige Leistungen', PROG['uebrige'])):
+        for kl_label, pr, fk in (('§45b', PROG['pk45b'], FAKT['pk45b']),
+                                 ('Übrige Leistungen', PROG['uebrige'], FAKT['uebrige'])):
             prg = pr['abr'] + pr['zukunft'] * quote
             prows += '<tr><td' + TDL + '>' + kl_label + '</td>'
-            for val in (pr['plan'], pr['abr'], prg):
+            for val in (pr['plan'], pr['abr'], prg, fk):
                 prows += '<td' + TD + '>' + ('%.2f' % val).replace('.', ',') + ' €</td>'
             prows += '</tr>'
         prows += '<tr style="font-weight:bold;background:#eef2f7;"><td' + TDL + '>Gesamt</td>'
-        for val in (plan_sum, abr_sum, prog_sum):
+        for val in (plan_sum, abr_sum, prog_sum, fakt_sum):
             prows += '<td' + TD + '>' + ('%.2f' % val).replace('.', ',') + ' €</td>'
         prows += '</tr>'
 
@@ -489,17 +506,20 @@ if env.context.get('umsatzreport_mail'):
             '<p style="margin:4px 0 0;color:#666;">&#916; = Ist minus Plan im Monat; rot ab 2 h Rückstand. '
             'Plan aus der Einsatzplanung, Ist aus der Zeiterfassung.</p>'
 
-            '<h3' + H3 + '>4 · Monats-Prognose</h3>'
+            '<h3' + H3 + '>4 · Monats-Prognose &amp; Fakturierung</h3>'
             '<table style="border-collapse:collapse;font-size:13px;" cellspacing="0">'
-            '<tr><th' + TH + '>Klasse</th><th' + THR + '>Plan</th><th' + THR + '>Schon abrechenbar</th>'
-            '<th' + THR + '>Prognose</th></tr>' + prows + '</table>'
+            '<tr><th' + TH + '>Klasse</th><th' + THR + '>Plan (Leistung)</th><th' + THR + '>Schon abrechenbar</th>'
+            '<th' + THR + '>Prognose Leistung</th><th' + THR + '>Fakturiert</th></tr>' + prows + '</table>'
             '<p style="margin:4px 0 0;color:#666;">Realisierungsquote ' + ('%.0f' % (quote * 100.0))
-            + ' % (letzte 3 Monate) · Sätze: §45b 43 €/h bis 31.12.2026, 53 €/h ab 01.01.2027 · Übrige 56 €/h</p>'
+            + ' % (letzte 3 Monate) · Sätze: §45b 43 €/h bis 31.12.2026, 53 €/h ab 01.01.2027 · Übrige 56 €/h<br/>'
+            '<b>Fakturiert</b> = gebuchte Ausgangsrechnungen (abzgl. Gutschriften) mit Rechnungsdatum im Monat – '
+            'darin steckt v. a. die Abrechnung des Vormonats und Umsatz ohne geplante Einsätze. '
+            'Nicht mit der Prognose addieren (teilweise derselbe Umsatz).</p>'
 
             '<p style="margin:14px 0 0;color:#666;">Details: Odoo &#8594; Menü „Umsatz-Report"</p></div>'
         )
         env['mail.mail'].create({
-            'subject': 'Umsatz-Report %s · Prognose %.0f € · Vormonat offen %.0f €' % (ym, prog_sum, v_sum),
+            'subject': 'Umsatz-Report %s · Prognose %.0f € · Fakturiert %.0f € · Vormonat offen %.0f €' % (ym, prog_sum, fakt_sum, v_sum),
             'body_html': body,
             'email_to': '__MAIL_AN__',
             'auto_delete': True,
@@ -523,7 +543,7 @@ LIST = ('<list decoration-success="x_ampel==\'gruen\'" decoration-warning="x_amp
         '<field name="x_plan_h" sum="Summe"/><field name="x_ist_h" sum="Summe"/>'
         '<field name="x_abrechenbar_h"/><field name="x_abw_h"/>'
         '<field name="x_plan_eur"/><field name="x_abrechenbar_eur"/>'
-        '<field name="x_prognose_eur"/>'
+        '<field name="x_prognose_eur"/><field name="x_fakturiert_eur"/>'
         '<field name="x_ampel" optional="hide"/><field name="x_hinweis"/></list>')
 SEARCH = ('<search><field name="x_name"/>'
           '<filter name="f_woche" string="Wochen" domain="[(\'x_typ\',\'=\',\'woche\')]"/>'
