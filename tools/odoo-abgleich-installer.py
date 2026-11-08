@@ -79,6 +79,8 @@ for name, ttype, label, extra in FIELDS:
     print(f'  Feld {name} {how}')
 
 # ------------------------------------------------- 1b) Zugriffsrechte (ACL)
+# Mit SKIP_ACL=1 überspringbar (z. B. wenn die Rechte manuell in der
+# Oberfläche angelegt werden: Einstellungen → Technisch → Zugriffsrechte).
 def xmlid(ref):
     mod, name = ref.split('.')
     d = kw('ir.model.data', 'search_read',
@@ -86,17 +88,20 @@ def xmlid(ref):
     return d[0]['res_id']
 
 
-for acl_name, group_ref, perms in [
-    ('access_x_abgleich_user', 'base.group_user',
-     {'perm_read': True, 'perm_write': False, 'perm_create': False, 'perm_unlink': False}),
-    ('access_x_abgleich_admin', 'base.group_system',
-     {'perm_read': True, 'perm_write': True, 'perm_create': True, 'perm_unlink': True}),
-]:
-    vals = {'name': acl_name, 'model_id': model_id, 'group_id': xmlid(group_ref)}
-    vals.update(perms)
-    _, how = upsert('ir.model.access',
-                    [['model_id', '=', model_id], ['name', '=', acl_name]], vals)
-    print(f'  ACL {acl_name} {how}')
+if os.environ.get('SKIP_ACL'):
+    print('  ACL-Anlage übersprungen (SKIP_ACL gesetzt) – Rechte manuell anlegen!')
+else:
+    for acl_name, group_ref, perms in [
+        ('access_x_abgleich_user', 'base.group_user',
+         {'perm_read': True, 'perm_write': False, 'perm_create': False, 'perm_unlink': False}),
+        ('access_x_abgleich_admin', 'base.group_system',
+         {'perm_read': True, 'perm_write': True, 'perm_create': True, 'perm_unlink': True}),
+    ]:
+        vals = {'name': acl_name, 'model_id': model_id, 'group_id': xmlid(group_ref)}
+        vals.update(perms)
+        _, how = upsert('ir.model.access',
+                        [['model_id', '=', model_id], ['name', '=', acl_name]], vals)
+        print(f'  ACL {acl_name} {how}')
 
 # -------------------------------------------- 2) Server-Action (Berechnung)
 CODE = r'''
@@ -247,10 +252,17 @@ print(f'Cron {how}')
 
 # ---------------------------------------------------------------- 5) Erster Lauf
 # ir.actions.server.run() per RPC scheitert an Rechten – der Cron-Trigger
-# (identisch zum Button "Manuell ausführen") funktioniert.
+# (identisch zum Button "Manuell ausführen") funktioniert. Ohne Zugriffs-
+# rechte (ACL) schlägt die Berechnung fehl – dann zuerst Rechte anlegen
+# und den Cron erneut manuell ausführen.
 print('Starte erste Berechnung über den Cron ...')
-kw('ir.cron', 'method_direct_trigger', [[cron_id]])
-n = kw('x_abgleich', 'search_count', [[]])
-rot = kw('x_abgleich', 'search_count', [[['x_ampel', '=', 'rot']]])
-print(f'Fertig: {n} Abgleich-Zeilen berechnet, davon {rot} rote Lücken.')
-print('In Odoo: Hauptmenü -> "Abrechnungs-Abgleich" (ggf. Browser neu laden).')
+try:
+    kw('ir.cron', 'method_direct_trigger', [[cron_id]])
+    n = kw('x_abgleich', 'search_count', [[]])
+    rot = kw('x_abgleich', 'search_count', [[['x_ampel', '=', 'rot']]])
+    print(f'Fertig: {n} Abgleich-Zeilen berechnet, davon {rot} rote Lücken.')
+    print('In Odoo: Hauptmenü -> "Abrechnungs-Abgleich" (ggf. Browser neu laden).')
+except SystemExit as e:
+    print(f'Erster Lauf noch nicht möglich: {e}')
+    print('Vermutlich fehlen die Zugriffsrechte (ir.model.access) für x_abgleich.')
+    print('Rechte anlegen, dann Cron "HL: Abrechnungs-Abgleich (täglich)" manuell ausführen.')
