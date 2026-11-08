@@ -126,6 +126,7 @@ CODE = r'''
 # Umsatz-Report: aktueller Monat je Woche + Prognose + Vormonat offen.
 # Saetze: §45b 43 EUR/h bis 31.12.2026, 53 EUR/h ab 01.01.2027; Uebrige 56 EUR/h.
 # Erstgespraeche und Urlaubs-Platzhalter-Slots fliessen nicht ein.
+ZIEL = 12000.0  # Monatsziel Umsatz netto
 heute = datetime.date.today()
 jahr, monat = heute.year, heute.month
 m_start = datetime.date(jahr, monat, 1)
@@ -445,6 +446,16 @@ rows.append({
     'x_ampel': 'gruen' if prog_sum >= plan_sum * 0.9 else 'gelb',
     'x_hinweis': 'Prognose = erwartete Leistung des Monats; Fakturiert = Rechnungen mit RG-Datum im Monat',
 })
+ziel_quote = prog_sum / ZIEL if ZIEL else 0.0
+ziel_luecke = ZIEL - prog_sum
+rows.append({
+    'x_name': 'Monatsziel %s (%.0f €)' % (ym, ZIEL),
+    'x_monat_ym': ym, 'x_typ': 'prognose', 'x_klasse': 'gesamt', 'x_sortier': 903,
+    'x_plan_eur': round(ZIEL, 2), 'x_prognose_eur': round(prog_sum, 2),
+    'x_ampel': 'gruen' if ziel_quote >= 1.0 else ('gelb' if ziel_quote >= 0.9 else 'rot'),
+    'x_hinweis': ('Zielerreichung %.0f %%' % (ziel_quote * 100.0))
+                 + ((' – es fehlen %.0f €' % ziel_luecke) if ziel_luecke > 0.5 else ' – Ziel erreicht'),
+})
 for r in rows:
     env['x_umsatzreport'].create(r)
 
@@ -533,11 +544,29 @@ if env.context.get('umsatzreport_mail'):
             frechnungen = ('<h3' + H3 + '>5 · Rechnungen des Monats</h3>'
                            '<p style="margin:0;color:#666;">Noch keine Rechnungen in diesem Monat gebucht.</p>')
 
+        # --- Ziel-Box
+        if ziel_quote >= 1.0:
+            zbg, zrand, ztext = '#e9f7ec', '#1b7a38', 'Ziel erreicht &#10003;'
+        elif ziel_quote >= 0.9:
+            zbg, zrand, ztext = '#fef7e0', '#b26a00', ('es fehlen ' + ('%.0f' % ziel_luecke).replace('.', ',') + ' €')
+        else:
+            zbg, zrand, ztext = '#fdecea', '#c62828', ('es fehlen ' + ('%.0f' % ziel_luecke).replace('.', ',') + ' €'
+                + ' &#8776; ' + ('%.0f' % (ziel_luecke / 43.0)) + ' h §45b oder '
+                + ('%.0f' % (ziel_luecke / 56.0)) + ' h Gewerbe')
+        zielbox = ('<div style="margin:10px 0 4px;padding:10px 14px;background:' + zbg
+                   + ';border-left:4px solid ' + zrand + ';">'
+                   '<span style="font-size:15px;font-weight:bold;color:' + zrand + ';">'
+                   'Monatsziel ' + ('%.0f' % ZIEL).replace('.', ',') + ' € &#183; Prognose '
+                   + ('%.0f' % prog_sum).replace('.', ',') + ' € &#183; Zielerreichung '
+                   + ('%.0f' % (ziel_quote * 100.0)) + ' %</span><br/>'
+                   '<span style="color:' + zrand + ';">' + ztext + '</span></div>')
+
         body = (
             '<div style="font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#222;max-width:880px;">'
             '<h2 style="margin:0 0 2px;color:#1f3a5f;">Umsatz-Report ' + MON[monat] + ' ' + str(jahr) + '</h2>'
             '<p style="margin:0 0 4px;color:#666;">Stand ' + heute.strftime('%d.%m.%Y')
             + ' · ohne Erstgespräche, interne Projekte &amp; Fahrzeiten</p>'
+            + zielbox +
 
             '<h3' + H3 + '>1 · Vormonat ' + MON[vm] + ' – noch abzurechnen</h3>'
             '<table style="border-collapse:collapse;font-size:13px;" cellspacing="0">'
@@ -576,7 +605,7 @@ if env.context.get('umsatzreport_mail'):
             '<p style="margin:14px 0 0;color:#666;">Details: Odoo &#8594; Menü „Umsatz-Report"</p></div>'
         )
         env['mail.mail'].create({
-            'subject': 'Umsatz-Report %s · Prognose %.0f € · Fakturiert %.0f € · Vormonat offen %.0f €' % (ym, prog_sum, fakt_sum, v_sum),
+            'subject': 'Umsatz-Report %s · Ziel %.0f %% · Prognose %.0f € · Fakturiert %.0f € · Vormonat offen %.0f €' % (ym, ziel_quote * 100.0, prog_sum, fakt_sum, v_sum),
             'body_html': body,
             'email_to': '__MAIL_AN__',
             'auto_delete': True,
