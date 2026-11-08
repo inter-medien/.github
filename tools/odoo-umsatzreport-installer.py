@@ -127,6 +127,8 @@ CODE = r'''
 # Saetze: §45b 43 EUR/h bis 31.12.2026, 53 EUR/h ab 01.01.2027; Uebrige 56 EUR/h.
 # Erstgespraeche und Urlaubs-Platzhalter-Slots fliessen nicht ein.
 ZIEL = 12000.0  # Monatsziel Umsatz netto
+FELD_EMPS = [6, 7]  # Feld-Mitarbeiter fuer die Kapazitaetsrechnung: Aaron, Kathrin
+KAP_STD_TAG = 6.0   # abrechenbare Stunden pro Mitarbeiter und Arbeitstag
 heute = datetime.date.today()
 jahr, monat = heute.year, heute.month
 m_start = datetime.date(jahr, monat, 1)
@@ -456,6 +458,27 @@ rows.append({
     'x_hinweis': ('Zielerreichung %.0f %%' % (ziel_quote * 100.0))
                  + ((' – es fehlen %.0f €' % ziel_luecke) if ziel_luecke > 0.5 else ' – Ziel erreicht'),
 })
+
+# Theoretische Kapazitaet: Feld-Mitarbeiter x 6 h/Arbeitstag x §45b-Satz,
+# abzueglich genehmigter Abwesenheiten.
+kap_satz = 43.0 if m_start < datetime.date(2027, 1, 1) else 53.0
+kap_tage = 0
+d = m_start
+while d < m_ende:
+    if d.weekday() < 5:
+        for eid in FELD_EMPS:
+            if (eid, d) not in leave_tage:
+                kap_tage += 1
+    d += datetime.timedelta(days=1)
+kap_eur = kap_tage * KAP_STD_TAG * kap_satz
+rows.append({
+    'x_name': 'Theoretische Kapazität %s' % ym,
+    'x_monat_ym': ym, 'x_typ': 'prognose', 'x_klasse': 'gesamt', 'x_sortier': 904,
+    'x_plan_eur': round(kap_eur, 2), 'x_prognose_eur': round(prog_sum, 2),
+    'x_ampel': 'gruen' if kap_eur >= ZIEL else 'gelb',
+    'x_hinweis': '%d Feld-MA à %.0f h/Arbeitstag × %.0f €, %d Einsatztage (abzgl. Urlaub/Krankheit)'
+                 % (len(FELD_EMPS), KAP_STD_TAG, kap_satz, kap_tage),
+})
 for r in rows:
     env['x_umsatzreport'].create(r)
 
@@ -559,7 +582,11 @@ if env.context.get('umsatzreport_mail'):
                    'Monatsziel ' + ('%.0f' % ZIEL).replace('.', ',') + ' € &#183; Prognose '
                    + ('%.0f' % prog_sum).replace('.', ',') + ' € &#183; Zielerreichung '
                    + ('%.0f' % (ziel_quote * 100.0)) + ' %</span><br/>'
-                   '<span style="color:' + zrand + ';">' + ztext + '</span></div>')
+                   '<span style="color:' + zrand + ';">' + ztext + '</span><br/>'
+                   '<span style="color:#555;">Theoretisch möglich (' + str(len(FELD_EMPS))
+                   + ' Feld-MA à ' + ('%.0f' % KAP_STD_TAG) + ' h/Tag × ' + ('%.0f' % kap_satz)
+                   + ' €, abzgl. Abwesenheiten): <b>' + ('%.0f' % kap_eur).replace('.', ',')
+                   + ' €</b> (' + str(kap_tage) + ' Einsatztage)</span></div>')
 
         body = (
             '<div style="font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#222;max-width:880px;">'
