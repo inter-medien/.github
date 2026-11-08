@@ -271,15 +271,19 @@ for s in env['planning.slot'].search([('start_datetime', '>=', str(m_start)),
 # Rechnungsdatum im laufenden Monat – unabhängig von der Planung. Faengt
 # Umsatz, der ohne (geplante) Einsaetze fakturiert wird.
 FAKT = {'pk45b': 0.0, 'uebrige': 0.0}
+FAKT_L = []
 for mv in env['account.move'].search([('move_type', 'in', ['out_invoice', 'out_refund']),
                                       ('state', '=', 'posted'),
                                       ('invoice_date', '>=', str(m_start)),
-                                      ('invoice_date', '<', str(m_ende))]):
+                                      ('invoice_date', '<', str(m_ende))],
+                                     order='invoice_date, name'):
     rp = mv.partner_id.commercial_partner_id if mv.partner_id else False
     kl = 'uebrige'
     if rp and (rp.id in pk_pat or any(c.id in pk_pat for c in rp.child_ids)):
         kl = 'pk45b'
     FAKT[kl] += mv.amount_untaxed_signed or 0.0
+    FAKT_L.append((mv.invoice_date, mv.name or '', rp.name if rp else '?',
+                   mv.amount_untaxed_signed or 0.0, mv.payment_state or ''))
 
 # --- Zeiterfassung des aktuellen Monats
 for l in env['account.analytic.line'].search([('date', '>=', str(m_start)),
@@ -480,6 +484,27 @@ if env.context.get('umsatzreport_mail'):
             prows += '<td' + TD + '>' + ('%.2f' % val).replace('.', ',') + ' €</td>'
         prows += '</tr>'
 
+        # --- Block 5: Einzelrechnungen des Monats
+        ZAHL = {'paid': ('bezahlt', '#1b7a38'), 'in_payment': ('in Zahlung', '#1b7a38'),
+                'partial': ('teilbezahlt', '#b26a00'), 'not_paid': ('offen', '#b26a00'),
+                'reversed': ('storniert', '#c62828')}
+        frows = ''
+        for (fdat, fnr, fkunde, fbetrag, fstate) in FAKT_L:
+            ztxt, zfarbe = ZAHL.get(fstate, (fstate, '#666666'))
+            frows += ('<tr><td' + TDL + '>' + fdat.strftime('%d.%m.') + '</td>'
+                      '<td' + TDL + '>' + fnr + '</td>'
+                      '<td' + TDL + '>' + fkunde + '</td>'
+                      '<td' + TD + '>' + ('%.2f' % fbetrag).replace('.', ',') + ' €</td>'
+                      '<td' + TDL + '><span style="color:' + zfarbe + ';">' + ztxt + '</span></td></tr>')
+        if FAKT_L:
+            frechnungen = ('<h3' + H3 + '>5 · Rechnungen des Monats (' + str(len(FAKT_L)) + ')</h3>'
+                           '<table style="border-collapse:collapse;font-size:13px;" cellspacing="0">'
+                           '<tr><th' + TH + '>Datum</th><th' + TH + '>Nummer</th><th' + TH + '>Kunde</th>'
+                           '<th' + THR + '>Netto</th><th' + TH + '>Zahlung</th></tr>' + frows + '</table>')
+        else:
+            frechnungen = ('<h3' + H3 + '>5 · Rechnungen des Monats</h3>'
+                           '<p style="margin:0;color:#666;">Noch keine Rechnungen in diesem Monat gebucht.</p>')
+
         body = (
             '<div style="font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#222;max-width:880px;">'
             '<h2 style="margin:0 0 2px;color:#1f3a5f;">Umsatz-Report ' + MON[monat] + ' ' + str(jahr) + '</h2>'
@@ -516,6 +541,7 @@ if env.context.get('umsatzreport_mail'):
             'darin steckt v. a. die Abrechnung des Vormonats und Umsatz ohne geplante Einsätze. '
             'Nicht mit der Prognose addieren (teilweise derselbe Umsatz).</p>'
 
+            + frechnungen +
             '<p style="margin:14px 0 0;color:#666;">Details: Odoo &#8594; Menü „Umsatz-Report"</p></div>'
         )
         env['mail.mail'].create({
