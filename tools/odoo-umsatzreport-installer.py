@@ -98,6 +98,28 @@ for name, ttype, label, extra in FIELDS:
     _, how = upsert('ir.model.fields', [['model_id', '=', model_id], ['name', '=', name]], vals)
     print(f'  Feld {name} {how}')
 
+# ------------------------------------------------- 1b) Zugriffsrechte (ACL)
+# Ohne ir.model.access kann niemand (auch kein Admin-UI-Nutzer) das Modell
+# lesen. Interne Benutzer: lesen; Administratoren: alles.
+def xmlid(ref):
+    mod, name = ref.split('.')
+    d = kw('ir.model.data', 'search_read',
+           [[['module', '=', mod], ['name', '=', name]]], {'fields': ['res_id'], 'limit': 1})
+    return d[0]['res_id']
+
+
+for acl_name, group_ref, perms in [
+    ('access_x_umsatzreport_user', 'base.group_user',
+     {'perm_read': True, 'perm_write': False, 'perm_create': False, 'perm_unlink': False}),
+    ('access_x_umsatzreport_admin', 'base.group_system',
+     {'perm_read': True, 'perm_write': True, 'perm_create': True, 'perm_unlink': True}),
+]:
+    vals = {'name': acl_name, 'model_id': model_id, 'group_id': xmlid(group_ref)}
+    vals.update(perms)
+    _, how = upsert('ir.model.access',
+                    [['model_id', '=', model_id], ['name', '=', acl_name]], vals)
+    print(f'  ACL {acl_name} {how}')
+
 # -------------------------------------------- 2) Server-Action (Berechnung)
 CODE = r'''
 # Umsatz-Report: aktueller Monat je Woche + Prognose + Vormonat offen.
@@ -415,7 +437,7 @@ SEARCH = ('<search><field name="x_name"/>'
           '<filter name="f_prog" string="Prognose" domain="[(\'x_typ\',\'=\',\'prognose\')]"/>'
           '<filter name="f_vormonat" string="Vormonat offen" domain="[(\'x_typ\',\'=\',\'vormonat\')]"/>'
           '<filter name="f_ohne_gesamt" string="ohne Gesamt-Zeilen" domain="[(\'x_klasse\',\'!=\',\'gesamt\')]"/>'
-          '<group expand="1" string="Gruppierung">'
+          '<group>'
           '<filter name="g_typ" string="Typ" context="{\'group_by\':\'x_typ\'}"/>'
           '<filter name="g_klasse" string="Klasse" context="{\'group_by\':\'x_klasse\'}"/>'
           '</group></search>')
@@ -446,19 +468,15 @@ cron_vals = {'name': 'HL: Umsatz-Report (täglich, Mail)', 'model_id': model_id,
              'code': 'env["ir.actions.server"].browse(%d).with_context(umsatzreport_mail=True).run()' % action_id,
              'interval_number': 1, 'interval_type': 'days',
              'nextcall': nextcall, 'active': True}
-try:
-    _, how = upsert('ir.cron', [['name', '=', 'HL: Umsatz-Report (täglich, Mail)']], cron_vals)
-    print(f'Cron {how} (nächster Lauf {nextcall} UTC, Mail an {MAIL_AN})')
-except SystemExit as e:
-    print(f'Cron konnte nicht angelegt werden: {e}')
-    print('Bitte manuell: Einstellungen → Technisch → Geplante Aktionen.')
+cron_id, how = upsert('ir.cron', [['name', '=', 'HL: Umsatz-Report (täglich, Mail)']], cron_vals)
+print(f'Cron {how} (nächster Lauf {nextcall} UTC, Mail an {MAIL_AN})')
 
-# ---------------------------------------------------------------- 5) Erster Lauf (ohne Mail)
-print('Starte erste Berechnung (ohne Mail) ...')
-kw('ir.actions.server', 'run', [[action_id]])
+# ---------------------------------------------------------------- 5) Erster Lauf
+# ir.actions.server.run() per RPC scheitert an Rechten – der Cron-Trigger
+# (identisch zum Button "Manuell ausführen") funktioniert und schickt auch
+# gleich die erste Mail.
+print('Starte erste Berechnung über den Cron (inkl. erster Mail) ...')
+kw('ir.cron', 'method_direct_trigger', [[cron_id]])
 n = kw('x_umsatzreport', 'search_count', [[]])
 print(f'Fertig: {n} Report-Zeilen berechnet.')
 print('In Odoo: Hauptmenü → "Umsatz-Report" (ggf. Browser neu laden).')
-print('Test-Mail: In Odoo die Server-Aktion "HL: Umsatz-Report berechnen" ist ohne Mail;')
-print('die tägliche Mail kommt über den Cron. Zum Sofort-Test den Cron in den')
-print('Geplanten Aktionen öffnen und "Manuell ausführen" klicken.')

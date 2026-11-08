@@ -78,6 +78,26 @@ for name, ttype, label, extra in FIELDS:
     _, how = upsert('ir.model.fields', [['model_id', '=', model_id], ['name', '=', name]], vals)
     print(f'  Feld {name} {how}')
 
+# ------------------------------------------------- 1b) Zugriffsrechte (ACL)
+def xmlid(ref):
+    mod, name = ref.split('.')
+    d = kw('ir.model.data', 'search_read',
+           [[['module', '=', mod], ['name', '=', name]]], {'fields': ['res_id'], 'limit': 1})
+    return d[0]['res_id']
+
+
+for acl_name, group_ref, perms in [
+    ('access_x_abgleich_user', 'base.group_user',
+     {'perm_read': True, 'perm_write': False, 'perm_create': False, 'perm_unlink': False}),
+    ('access_x_abgleich_admin', 'base.group_system',
+     {'perm_read': True, 'perm_write': True, 'perm_create': True, 'perm_unlink': True}),
+]:
+    vals = {'name': acl_name, 'model_id': model_id, 'group_id': xmlid(group_ref)}
+    vals.update(perms)
+    _, how = upsert('ir.model.access',
+                    [['model_id', '=', model_id], ['name', '=', acl_name]], vals)
+    print(f'  ACL {acl_name} {how}')
+
 # -------------------------------------------- 2) Server-Action (Berechnung)
 CODE = r'''
 # Abrechnungs-Abgleich: letzte 3 Monate (inkl. laufendem) neu berechnen.
@@ -196,7 +216,7 @@ LIST = ('<list decoration-success="x_ampel==\'gruen\'" decoration-warning="x_amp
 SEARCH = ('<search><field name="x_partner_id"/><field name="x_monat_ym"/>'
           '<filter name="rot" string="Lücken (rot)" domain="[(\'x_ampel\',\'=\',\'rot\')]"/>'
           '<filter name="gelb" string="Prüfen (gelb)" domain="[(\'x_ampel\',\'=\',\'gelb\')]"/>'
-          '<group expand="1" string="Gruppierung">'
+          '<group>'
           '<filter name="g_monat" string="Monat" context="{\'group_by\':\'x_monat_ym\'}"/>'
           '<filter name="g_kunde" string="Kunde" context="{\'group_by\':\'x_partner_id\'}"/>'
           '<filter name="g_ampel" string="Ampel" context="{\'group_by\':\'x_ampel\'}"/>'
@@ -222,12 +242,14 @@ print(f'Menüpunkt {how} (id {menu_id})')
 cron_vals = {'name': 'HL: Abrechnungs-Abgleich (täglich)', 'model_id': model_id,
              'state': 'code', 'code': 'env["ir.actions.server"].browse(%d).run()' % action_id,
              'interval_number': 1, 'interval_type': 'days', 'active': True}
-_, how = upsert('ir.cron', [['name', '=', 'HL: Abrechnungs-Abgleich (täglich)']], cron_vals)
+cron_id, how = upsert('ir.cron', [['name', '=', 'HL: Abrechnungs-Abgleich (täglich)']], cron_vals)
 print(f'Cron {how}')
 
 # ---------------------------------------------------------------- 5) Erster Lauf
-print('Starte erste Berechnung ...')
-kw('ir.actions.server', 'run', [[action_id]])
+# ir.actions.server.run() per RPC scheitert an Rechten – der Cron-Trigger
+# (identisch zum Button "Manuell ausführen") funktioniert.
+print('Starte erste Berechnung über den Cron ...')
+kw('ir.cron', 'method_direct_trigger', [[cron_id]])
 n = kw('x_abgleich', 'search_count', [[]])
 rot = kw('x_abgleich', 'search_count', [[['x_ampel', '=', 'rot']]])
 print(f'Fertig: {n} Abgleich-Zeilen berechnet, davon {rot} rote Lücken.')
