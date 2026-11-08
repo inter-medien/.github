@@ -150,6 +150,12 @@ while d < m_ende:
     wochen.append((d.isocalendar()[1], ws, wend))
     d = we + datetime.timedelta(days=1)
 
+EMP = {}
+akt_kw = None
+for (k, ws, wend) in wochen:
+    if ws <= heute <= wend:
+        akt_kw = k
+
 # --- Abwesenheiten (genehmigt + zur Genehmigung): Stunden je Woche, Tage je Mitarbeiter
 leaves = env['hr.leave'].search([('state', 'in', ['validate', 'confirm']),
                                  ('date_from', '<', str(m_ende)), ('date_to', '>=', str(m_start))])
@@ -180,6 +186,9 @@ for lv in leaves:
             dd += datetime.timedelta(days=1)
         if tot_wd:
             ABW[kwnr] = ABW.get(kwnr, 0.0) + std * n / tot_wd
+            if lv.employee_id:
+                em = EMP.setdefault(lv.employee_id.name, {'wp': 0.0, 'wi': 0.0, 'mp': 0.0, 'mi': 0.0, 'abw': 0.0})
+                em['abw'] += std * n / tot_wd
 
 # --- Realisierungsquote aus den letzten 3 Monaten
 q_start = v_start
@@ -232,6 +241,13 @@ for s in env['planning.slot'].search([('start_datetime', '>=', str(m_start)),
     key = (kwnr, kl)
     w = W.setdefault(key, {'plan_h': 0.0, 'plan_eur': 0.0, 'abr_h': 0.0, 'abr_eur': 0.0, 'ist_h': 0.0})
     w['plan_h'] += h
+    if s.employee_ids:
+        anteil = h / len(s.employee_ids)
+        for e in s.employee_ids:
+            em = EMP.setdefault(e.name, {'wp': 0.0, 'wi': 0.0, 'mp': 0.0, 'mi': 0.0, 'abw': 0.0})
+            em['mp'] += anteil
+            if kwnr == akt_kw:
+                em['wp'] += anteil
     if st != 'nicht_abrechenbar':
         w['plan_eur'] += eur
         PROG[kl]['plan'] += eur
@@ -274,6 +290,11 @@ for l in env['account.analytic.line'].search([('date', '>=', str(m_start)),
     key = (kwnr, kl)
     w = W.setdefault(key, {'plan_h': 0.0, 'plan_eur': 0.0, 'abr_h': 0.0, 'abr_eur': 0.0, 'ist_h': 0.0})
     w['ist_h'] += l.unit_amount or 0.0
+    if l.employee_id:
+        em = EMP.setdefault(l.employee_id.name, {'wp': 0.0, 'wi': 0.0, 'mp': 0.0, 'mi': 0.0, 'abw': 0.0})
+        em['mi'] += l.unit_amount or 0.0
+        if kwnr == akt_kw:
+            em['wi'] += l.unit_amount or 0.0
 
 # --- Vormonat: noch abzurechnen (Status offen)
 V = {'pk45b': 0.0, 'uebrige': 0.0}
@@ -343,7 +364,9 @@ for (kwnr, ws, wend) in wochen:
         'x_ampel': 'gruen', 'x_hinweis': ('inkl. %.1f h Abwesenheit' % abw) if abw else '',
     })
     sortnr += 1
-    mail_wochen.append((label, g, abw))
+    LEER = {'plan_h': 0.0, 'plan_eur': 0.0, 'abr_h': 0.0, 'abr_eur': 0.0, 'ist_h': 0.0}
+    mail_wochen.append((label, W.get((kwnr, 'pk45b'), LEER), W.get((kwnr, 'uebrige'), LEER),
+                        g, abw, kwnr == akt_kw))
 
 # Monats-Prognose
 prog_sum = 0.0
@@ -380,30 +403,100 @@ for r in rows:
 # ================================================================ Mail
 if env.context.get('umsatzreport_mail'):
     try:
-        zeilen = ''
-        for (label, g, abw) in mail_wochen:
-            zeilen += ('<tr><td style="padding:2px 8px;">%s</td>'
-                       '<td style="padding:2px 8px;text-align:right;">%.1f h</td>'
-                       '<td style="padding:2px 8px;text-align:right;">%.1f h</td>'
-                       '<td style="padding:2px 8px;text-align:right;">%.2f €</td>'
-                       '<td style="padding:2px 8px;text-align:right;">%.2f €</td>'
-                       '<td style="padding:2px 8px;text-align:right;">%.1f h</td></tr>'
-                       % (label, g['plan_h'], g['ist_h'], g['plan_eur'], g['abr_eur'], abw))
+        MON = {1: 'Januar', 2: 'Februar', 3: 'März', 4: 'April', 5: 'Mai', 6: 'Juni',
+               7: 'Juli', 8: 'August', 9: 'September', 10: 'Oktober', 11: 'November', 12: 'Dezember'}
+        TD = ' style="padding:4px 10px;text-align:right;border:1px solid #d8dee6;white-space:nowrap;"'
+        TDL = ' style="padding:4px 10px;border:1px solid #d8dee6;"'
+        TH = ' style="padding:5px 10px;background:#1f3a5f;color:#ffffff;border:1px solid #1f3a5f;text-align:left;"'
+        THR = ' style="padding:5px 10px;background:#1f3a5f;color:#ffffff;border:1px solid #1f3a5f;text-align:right;"'
+        H3 = ' style="margin:18px 0 6px;color:#1f3a5f;font-size:15px;"'
+
+        # --- Block 1: Vormonat
+        vrows = ''
+        for kl_label, betrag in (('§45b (Pflegekasse)', V['pk45b']), ('Übrige Leistungen', V['uebrige'])):
+            vrows += ('<tr><td' + TDL + '>' + kl_label + '</td><td' + TD + '>'
+                      + ('%.2f' % betrag).replace('.', ',') + ' €</td></tr>')
+        vrows += ('<tr style="font-weight:bold;background:#eef2f7;"><td' + TDL + '>Gesamt</td><td' + TD + '>'
+                  + ('%.2f' % v_sum).replace('.', ',') + ' €</td></tr>')
+
+        # --- Block 2: Wochen im Detail
+        wrows = ''
+        for (label, wpk, wgw, g, abw, akt) in mail_wochen:
+            for kl_label, w, extra in (('§45b', wpk, ''), ('Übrige', wgw, ''),
+                                       ('Gesamt', g, 'font-weight:bold;background:#eef2f7;')):
+                hl = 'background:#fff8dc;' if (akt and not extra) else ''
+                z = '<tr style="' + hl + extra + '">'
+                z += '<td' + TDL + '>' + (label + (' &#9654;' if akt else '') if kl_label == '§45b' else '') + '</td>'
+                z += '<td' + TDL + '>' + kl_label + '</td>'
+                for val, fmt, suffix in ((w['plan_h'], '%.1f', ''), (w['ist_h'], '%.1f', ''),
+                                         (w['abr_h'], '%.1f', ''), (w['plan_eur'], '%.2f', ' €'),
+                                         (w['abr_eur'], '%.2f', ' €')):
+                    z += '<td' + TD + '>' + (fmt % val).replace('.', ',') + suffix + '</td>'
+                z += '<td' + TD + '>' + ((('%.1f' % abw).replace('.', ',') + ' h') if (kl_label == 'Gesamt' and abw > 0.05) else '') + '</td>'
+                wrows += z + '</tr>'
+
+        # --- Block 3: Mitarbeiter (laufender Monat)
+        erows = ''
+        for en in sorted(EMP):
+            em = EMP[en]
+            delta = em['mi'] - em['mp']
+            farbe = '#c62828' if delta < -2 else '#222222'
+            erows += '<tr><td' + TDL + '>' + en + '</td>'
+            for val in (em['wp'], em['wi'], em['mp'], em['mi']):
+                erows += '<td' + TD + '>' + ('%.1f' % val).replace('.', ',') + '</td>'
+            erows += ('<td' + TD + ' ><span style="color:' + farbe + ';">'
+                      + ('%+.1f' % delta).replace('.', ',') + '</span></td>')
+            erows += '<td' + TD + '>' + (('%.1f' % em['abw']).replace('.', ',') if em['abw'] > 0.05 else '–') + '</td></tr>'
+        if not erows:
+            erows = '<tr><td' + TDL + ' colspan="7">Keine Daten</td></tr>'
+
+        # --- Block 4: Prognose
+        prows = ''
+        for kl_label, pr in (('§45b', PROG['pk45b']), ('Übrige Leistungen', PROG['uebrige'])):
+            prg = pr['abr'] + pr['zukunft'] * quote
+            prows += '<tr><td' + TDL + '>' + kl_label + '</td>'
+            for val in (pr['plan'], pr['abr'], prg):
+                prows += '<td' + TD + '>' + ('%.2f' % val).replace('.', ',') + ' €</td>'
+            prows += '</tr>'
+        prows += '<tr style="font-weight:bold;background:#eef2f7;"><td' + TDL + '>Gesamt</td>'
+        for val in (plan_sum, abr_sum, prog_sum):
+            prows += '<td' + TD + '>' + ('%.2f' % val).replace('.', ',') + ' €</td>'
+        prows += '</tr>'
+
         body = (
-            '<div style="font-family:sans-serif;font-size:13px;">'
-            '<h2 style="margin:0 0 6px;">Umsatz-Report %s</h2>'
-            '<p style="margin:0 0 10px;color:#666;">Stand %s · §45b vs. Übrige · ohne Erstgespräche</p>'
-            '<p style="margin:0 0 10px;"><b>Vormonat %s noch abzurechnen: %.2f €</b> (§45b %.2f € · Übrige %.2f €)</p>'
-            '<table style="border-collapse:collapse;font-size:13px;" border="1" cellspacing="0">'
-            '<tr style="background:#1f3a5f;color:#fff;"><th style="padding:3px 8px;">Woche</th>'
-            '<th style="padding:3px 8px;">Plan h</th><th style="padding:3px 8px;">Ist h</th>'
-            '<th style="padding:3px 8px;">Plan €</th><th style="padding:3px 8px;">Abrechenbar €</th>'
-            '<th style="padding:3px 8px;">Abwesenheit</th></tr>%s</table>'
-            '<p style="margin:10px 0 0;font-size:15px;"><b>Monats-Prognose: %.2f €</b> '
-            '(Plan %.2f € · schon abrechenbar %.2f € · Quote %.0f%%)</p>'
-            '<p style="margin:6px 0 0;color:#666;">Details: Odoo → Menü „Umsatz-Report“</p></div>'
-            % (ym, heute.strftime('%d.%m.%Y'), vym, v_sum, V['pk45b'], V['uebrige'],
-               zeilen, prog_sum, plan_sum, abr_sum, quote * 100.0)
+            '<div style="font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#222;max-width:880px;">'
+            '<h2 style="margin:0 0 2px;color:#1f3a5f;">Umsatz-Report ' + MON[monat] + ' ' + str(jahr) + '</h2>'
+            '<p style="margin:0 0 4px;color:#666;">Stand ' + heute.strftime('%d.%m.%Y')
+            + ' · ohne Erstgespräche, interne Projekte &amp; Fahrzeiten</p>'
+
+            '<h3' + H3 + '>1 · Vormonat ' + MON[vm] + ' – noch abzurechnen</h3>'
+            '<table style="border-collapse:collapse;font-size:13px;" cellspacing="0">'
+            '<tr><th' + TH + '>Klasse</th><th' + THR + '>Offen</th></tr>' + vrows + '</table>'
+            + ('<p style="margin:4px 0 0;color:#b26a00;">&#9888; Diese Slots stehen auf „abrechenbar (offen)" – jetzt Rechnungen/Nachweise stellen.</p>' if v_sum > 0.005 else
+               '<p style="margin:4px 0 0;color:#1b7a38;">Alles abgerechnet.</p>')
+
+            + '<h3' + H3 + '>2 · Wochen im Detail (&#9654; = laufende Woche)</h3>'
+            '<table style="border-collapse:collapse;font-size:13px;" cellspacing="0">'
+            '<tr><th' + TH + '>Woche</th><th' + TH + '>Klasse</th><th' + THR + '>Plan h</th>'
+            '<th' + THR + '>Ist h</th><th' + THR + '>Abrechenb. h</th><th' + THR + '>Plan</th>'
+            '<th' + THR + '>Abrechenbar</th><th' + THR + '>Abwesend</th></tr>' + wrows + '</table>'
+
+            '<h3' + H3 + '>3 · Mitarbeiter (laufender Monat)</h3>'
+            '<table style="border-collapse:collapse;font-size:13px;" cellspacing="0">'
+            '<tr><th' + TH + '>Mitarbeiter</th><th' + THR + '>Woche Plan h</th><th' + THR + '>Woche Ist h</th>'
+            '<th' + THR + '>Monat Plan h</th><th' + THR + '>Monat Ist h</th><th' + THR + '>&#916; h</th>'
+            '<th' + THR + '>Abwesend h</th></tr>' + erows + '</table>'
+            '<p style="margin:4px 0 0;color:#666;">&#916; = Ist minus Plan im Monat; rot ab 2 h Rückstand. '
+            'Plan aus der Einsatzplanung, Ist aus der Zeiterfassung.</p>'
+
+            '<h3' + H3 + '>4 · Monats-Prognose</h3>'
+            '<table style="border-collapse:collapse;font-size:13px;" cellspacing="0">'
+            '<tr><th' + TH + '>Klasse</th><th' + THR + '>Plan</th><th' + THR + '>Schon abrechenbar</th>'
+            '<th' + THR + '>Prognose</th></tr>' + prows + '</table>'
+            '<p style="margin:4px 0 0;color:#666;">Realisierungsquote ' + ('%.0f' % (quote * 100.0))
+            + ' % (letzte 3 Monate) · Sätze: §45b 43 €/h bis 31.12.2026, 53 €/h ab 01.01.2027 · Übrige 56 €/h</p>'
+
+            '<p style="margin:14px 0 0;color:#666;">Details: Odoo &#8594; Menü „Umsatz-Report"</p></div>'
         )
         env['mail.mail'].create({
             'subject': 'Umsatz-Report %s · Prognose %.0f € · Vormonat offen %.0f €' % (ym, prog_sum, v_sum),
