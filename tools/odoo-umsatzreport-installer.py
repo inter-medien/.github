@@ -332,7 +332,9 @@ for l in env['account.analytic.line'].search([('date', '>=', str(m_start)),
                                               ('date', '<', str(m_ende)),
                                               ('employee_id', '!=', False)]):
     pn = (l.project_id.name or '').lower()
-    if 'fahrt' in pn:
+    # Nur das interne Projekt "Fahrtzeiten" ist Anfahrtszeit. Kundenprojekte
+    # wie "Logistikfahrten" (ESB) sind abrechenbare Arbeit!
+    if 'fahrtzeit' in pn:
         # Fahrzeiten je Mitarbeiter mitzaehlen (fliessen nicht in Plan/Ist)
         if l.employee_id:
             em = EMP.setdefault(l.employee_id.name, dict(EMPDEF))

@@ -139,7 +139,9 @@ for (jahr, monat) in monate:
     for l in lines:
         pname = l.project_id.name or ''
         pl = pname.lower()
-        if 'intern' in pl or 'fahrt' in pl:
+        # 'fahrtzeit' statt 'fahrt': Kundenprojekte wie "Logistikfahrten"
+        # (ESB) sind abrechenbare Arbeit und gehoeren in den Abgleich.
+        if 'intern' in pl or 'fahrtzeit' in pl:
             continue
         p = l.partner_id
         if not p and l.planning_slot_id:
