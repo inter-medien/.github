@@ -326,7 +326,11 @@ for vp in env['res.partner'].search([('x_vertragskunde', '=', True)]):
             pn2 = (l.project_id.name or '').lower()
             if 'intern' not in pn2 and 'fahrtzeit' not in pn2:
                 vstd += l.unit_amount or 0.0
-    VERTRAG.append((root.name, abos, vstd))
+    letzte = env['account.move'].search([('move_type', '=', 'out_invoice'), ('state', '=', 'posted'),
+                                         ('partner_id', 'child_of', root.id)],
+                                        order='invoice_date desc', limit=2)
+    rg_daten = [i.invoice_date for i in letzte if i.invoice_date]
+    VERTRAG.append((root.name, abos, vstd, rg_daten))
 
 # --- Fakturiert: gebuchte Ausgangsrechnungen (inkl. Gutschriften) mit
 # Rechnungsdatum im laufenden Monat – unabhängig von der Planung. Faengt
@@ -572,12 +576,30 @@ if env.context.get('umsatzreport_mail'):
         # --- Block 1b: Vertragskunden-Check (Abo-Faelligkeit)
         vrows = ''
         vk_problem = 0
-        for (vname, abos, vstd) in sorted(VERTRAG):
+        for (vname, abos, vstd, rg_daten) in sorted(VERTRAG):
             if not abos:
-                status = '<span style="color:#c62828;font-weight:bold;">KEIN ABO in Odoo</span>' +                          ((' · ' + ('%.1f' % vstd).replace('.', ',') + ' h diesen Monat erfasst!') if vstd > 0.1 else '')
-                plan_txt = '–'; pausch_txt = '–'; next_txt = '–'
-                if vstd > 0.1:
+                plan_txt = 'kein Abo'; pausch_txt = '–'
+                if rg_daten:
+                    tage = (heute - rg_daten[0]).days
+                    next_txt = 'letzte RG ' + rg_daten[0].strftime('%d.%m.%Y')
+                    # Rhythmus aus den letzten beiden Rechnungen schaetzen (min. 30 Tage)
+                    intervall = max((rg_daten[0] - rg_daten[1]).days, 30) if len(rg_daten) > 1 else 45
+                    if tage > intervall * 1.5:
+                        status = ('<span style="color:#c62828;font-weight:bold;">RECHNUNG ÜBERFÄLLIG</span> ('
+                                  + str(tage) + ' Tage seit letzter, Rhythmus ~' + str(intervall) + ' Tage)')
+                        vk_problem += 1
+                    elif tage > intervall:
+                        status = ('<span style="color:#b26a00;font-weight:bold;">Rechnung fällig</span> ('
+                                  + str(tage) + ' Tage seit letzter, Rhythmus ~' + str(intervall) + ' Tage)')
+                        vk_problem += 1
+                    else:
+                        status = '<span style="color:#1b7a38;">ok</span> (nächste in ~' + str(max(0, intervall - tage)) + ' Tagen)'
+                else:
+                    next_txt = 'nie fakturiert'
+                    status = '<span style="color:#c62828;font-weight:bold;">KEIN ABO, KEINE RECHNUNG</span>'
                     vk_problem += 1
+                if vstd > 0.1:
+                    status += ' · ' + ('%.1f' % vstd).replace('.', ',') + ' h diesen Monat erfasst'
             else:
                 ueber = [a for a in abos if a['next'] and a['next'] < heute]
                 a0 = (ueber or abos)[0]
