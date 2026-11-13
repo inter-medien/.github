@@ -61,7 +61,7 @@ FIELDS = [
     ('x_name',            'char',      'Bezeichnung', {}),
     ('x_monat_ym',        'char',      'Monat', {}),
     ('x_partner_id',      'many2one',  'Kunde', {'relation': 'res.partner'}),
-    ('x_klasse',          'selection', 'Klasse', {'selection': "[('pk45b','§45b Pflegekasse'),('gewerbe','Gewerbe/Privat'),('pruefen','Bitte prüfen')]"}),
+    ('x_klasse',          'selection', 'Klasse', {'selection': "[('pk45b','§45b Pflegekasse'),('gewerbe','Gewerbe/Privat'),('vertrag','Vertragskunde'),('pruefen','Bitte prüfen')]"}),
     ('x_stunden',         'float',     'Stunden erfasst', {}),
     ('x_erwartet_eur',    'float',     'Erwartet € (56 €/h)', {}),
     ('x_gedeckt_eur',     'float',     'Gedeckt € (Rechnungen M..M+1)', {}),
@@ -125,6 +125,15 @@ pk_patienten = set(n['x_patient_id'][0] for n in env['x_pk_nachweis'].search_rea
 mitarbeiter_partner = set(e.user_id.partner_id.id
     for e in env['hr.employee'].search([('user_id', '!=', False)]) if e.user_id.partner_id)
 
+# Vertragskunden (Monatspauschale statt Stundenabrechnung) + aktive Abos
+vertrag_roots = set()
+for vp in env['res.partner'].search([('x_vertragskunde', '=', True)]):
+    vertrag_roots.add(vp.commercial_partner_id.id if vp.commercial_partner_id else vp.id)
+abo_pauschale = {}
+for so in env['sale.order'].search([('subscription_state', '=', '3_progress')]):
+    rp = so.partner_id.commercial_partner_id.id if so.partner_id else 0
+    abo_pauschale[rp] = abo_pauschale.get(rp, 0.0) + (so.recurring_total or 0.0)
+
 for (jahr, monat) in monate:
     start = datetime.date(jahr, monat, 1)
     ende = datetime.date(jahr + 1, 1, 1) if monat == 12 else datetime.date(jahr, monat + 1, 1)
@@ -183,6 +192,32 @@ for (jahr, monat) in monate:
                 vals.update({'x_ampel': 'gelb', 'x_hinweis': 'Unterschrieben, aber noch nicht eingereicht'})
             else:
                 vals.update({'x_ampel': 'gruen', 'x_hinweis': 'Nachweis eingereicht/abgerechnet'})
+        elif p.id in vertrag_roots:
+            # Vertragskunde: Massstab ist die Monats-Pauschale (aktives Abo),
+            # nicht Stunden x Satz. Fehlt die Monatsrechnung, ist das ein
+            # klassischer Durchrutscher -> rot.
+            pausch = round(abo_pauschale.get(p.id, 0.0), 2)
+            invs = env['account.move'].search([
+                ('move_type', '=', 'out_invoice'), ('state', '=', 'posted'),
+                ('partner_id', 'child_of', p.id),
+                ('invoice_date', '>=', start), ('invoice_date', '<', ende)])
+            gedeckt = round(sum(i.amount_untaxed_signed for i in invs), 2)
+            vals.update({'x_klasse': 'vertrag', 'x_erwartet_eur': pausch,
+                         'x_gedeckt_eur': gedeckt,
+                         'x_delta_eur': round(gedeckt - pausch, 2)})
+            laufend = ende > today
+            if pausch <= 0:
+                vals.update({'x_ampel': 'rot',
+                             'x_hinweis': 'Vertragskunde OHNE aktives Abo (%.2f h erfasst) - Pauschale pruefen!' % std})
+            elif gedeckt <= 0:
+                vals.update({'x_ampel': 'gelb' if laufend else 'rot',
+                             'x_hinweis': 'Vertragsrechnung fehlt (Pauschale %.2f EUR/Monat)' % pausch
+                                          + (' (Monat laeuft noch)' if laufend else '')})
+            elif gedeckt < pausch * 0.99:
+                vals.update({'x_ampel': 'gelb',
+                             'x_hinweis': 'Rechnung %.2f EUR unter Pauschale %.2f EUR' % (gedeckt, pausch)})
+            else:
+                vals.update({'x_ampel': 'gruen', 'x_hinweis': 'Vertrag fakturiert (%.2f h geleistet)' % std})
         else:
             erwartet = round(std * SATZ, 2)
             invs = env['account.move'].search([

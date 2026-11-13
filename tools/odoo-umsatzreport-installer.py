@@ -299,6 +299,32 @@ for (ename, atag), paare in ATT.items():
     if akt_ws and akt_ws <= atag <= akt_wend:
         em['wpa'] += pause_h
 
+# --- Vertragskunden-Check: Monatspauschale vs. tatsaechliche Rechnung.
+# Vertragskunden-Slots sind 'nicht_abrechenbar' (durch Pauschale gedeckt) -
+# dieser Check stellt sicher, dass die Pauschalen-Rechnung wirklich kommt.
+VERTRAG = []
+vk_abo = {}
+for so in env['sale.order'].search([('subscription_state', '=', '3_progress')]):
+    rp = so.partner_id.commercial_partner_id.id if so.partner_id else 0
+    vk_abo[rp] = vk_abo.get(rp, 0.0) + (so.recurring_total or 0.0)
+vk_seen = set()
+for vp in env['res.partner'].search([('x_vertragskunde', '=', True)]):
+    root = vp.commercial_partner_id if vp.commercial_partner_id else vp
+    if root.id in vk_seen:
+        continue
+    vk_seen.add(root.id)
+    pausch = vk_abo.get(root.id, 0.0)
+    rg_vm = 0.0
+    rg_m = 0.0
+    for i in env['account.move'].search([('move_type', '=', 'out_invoice'), ('state', '=', 'posted'),
+                                         ('partner_id', 'child_of', root.id),
+                                         ('invoice_date', '>=', str(v_start)), ('invoice_date', '<', str(m_ende))]):
+        if i.invoice_date and i.invoice_date >= m_start:
+            rg_m += i.amount_untaxed_signed or 0.0
+        else:
+            rg_vm += i.amount_untaxed_signed or 0.0
+    VERTRAG.append((root.name, pausch, rg_vm, rg_m))
+
 # --- Fakturiert: gebuchte Ausgangsrechnungen (inkl. Gutschriften) mit
 # Rechnungsdatum im laufenden Monat – unabhängig von der Planung. Faengt
 # Umsatz, der ohne (geplante) Einsaetze fakturiert wird.
@@ -540,6 +566,36 @@ if env.context.get('umsatzreport_mail'):
         vrows += ('<tr style="font-weight:bold;background:#eef2f7;"><td' + TDL + '>Gesamt</td><td' + TD + '>'
                   + ('%.2f' % v_sum).replace('.', ',') + ' €</td></tr>')
 
+        # --- Block 1b: Vertragskunden-Check
+        vrows = ''
+        vk_problem = 0
+        for (vname, pausch, rg_vm, rg_m) in sorted(VERTRAG):
+            ohne_abo = pausch <= 0
+            vm_fehlt = pausch > 0 and rg_vm <= 0
+            m_fehlt = pausch > 0 and rg_m <= 0
+            if ohne_abo or vm_fehlt:
+                vk_problem += 1
+            def zelle(betrag, fehlt):
+                if betrag > 0:
+                    return '<td' + TD + '>' + ('%.2f' % betrag).replace('.', ',') + ' €</td>'
+                return ('<td' + TD + ' ><span style="color:' + ('#c62828' if fehlt else '#9aabc0') + ';font-weight:bold;">'
+                        + ('FEHLT' if fehlt else '–') + '</span></td>')
+            vrows += ('<tr><td' + TDL + '>' + vname + '</td>'
+                      + ('<td' + TD + '>' + ('%.2f' % pausch).replace('.', ',') + ' €</td>' if pausch > 0 else
+                         '<td' + TD + ' ><span style="color:#c62828;font-weight:bold;">kein Abo!</span></td>')
+                      + zelle(rg_vm, vm_fehlt) + zelle(rg_m, m_fehlt) + '</tr>')
+        if VERTRAG:
+            vertragblock = ('<h3' + H3 + '>1b · Vertragskunden: Pauschale vs. Rechnung</h3>'
+                '<table style="border-collapse:collapse;font-size:13px;" cellspacing="0">'
+                '<tr><th' + TH + '>Vertragskunde</th><th' + THR + '>Pauschale/Monat</th>'
+                '<th' + THR + '>Rechnung ' + MON[vm] + '</th><th' + THR + '>Rechnung ' + MON[monat] + '</th></tr>'
+                + vrows + '</table>'
+                + ('<p style="margin:4px 0 0;color:#c62828;">&#9888; ' + str(vk_problem)
+                   + ' Vertragskunde(n) ohne Abo bzw. ohne Vormonats-Rechnung - bitte fakturieren.</p>' if vk_problem else
+                   '<p style="margin:4px 0 0;color:#1b7a38;">Alle Vertragspauschalen fakturiert.</p>'))
+        else:
+            vertragblock = ''
+
         # --- Block 2: Wochen im Detail
         wrows = ''
         for (label, wpk, wgw, g, abw, akt) in mail_wochen:
@@ -646,6 +702,7 @@ if env.context.get('umsatzreport_mail'):
                + ' noch ohne Stunden) · Übrige: erledigte Einsätze ohne Rechnung.</p>' if v_sum > 0.005 else
                '<p style="margin:4px 0 0;color:#1b7a38;">Alles abgerechnet.</p>')
 
+            + vertragblock
             + '<h3' + H3 + '>2 · Wochen im Detail (&#9654; = laufende Woche)</h3>'
             '<table style="border-collapse:collapse;font-size:13px;" cellspacing="0">'
             '<tr><th' + TH + '>Woche</th><th' + TH + '>Klasse</th><th' + THR + '>Plan h</th>'
