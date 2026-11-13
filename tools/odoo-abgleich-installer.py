@@ -129,10 +129,14 @@ mitarbeiter_partner = set(e.user_id.partner_id.id
 vertrag_roots = set()
 for vp in env['res.partner'].search([('x_vertragskunde', '=', True)]):
     vertrag_roots.add(vp.commercial_partner_id.id if vp.commercial_partner_id else vp.id)
-abo_pauschale = {}
+vertrag_abos = {}
 for so in env['sale.order'].search([('subscription_state', '=', '3_progress')]):
     rp = so.partner_id.commercial_partner_id.id if so.partner_id else 0
-    abo_pauschale[rp] = abo_pauschale.get(rp, 0.0) + (so.recurring_total or 0.0)
+    vertrag_abos.setdefault(rp, []).append({
+        'total': so.recurring_total or 0.0,
+        'next': so.next_invoice_date,
+        'plan': so.plan_id.name if so.plan_id else '?',
+    })
 
 for (jahr, monat) in monate:
     start = datetime.date(jahr, monat, 1)
@@ -193,31 +197,32 @@ for (jahr, monat) in monate:
             else:
                 vals.update({'x_ampel': 'gruen', 'x_hinweis': 'Nachweis eingereicht/abgerechnet'})
         elif p.id in vertrag_roots:
-            # Vertragskunde: Massstab ist die Monats-Pauschale (aktives Abo),
-            # nicht Stunden x Satz. Fehlt die Monatsrechnung, ist das ein
-            # klassischer Durchrutscher -> rot.
-            pausch = round(abo_pauschale.get(p.id, 0.0), 2)
+            # Vertragskunde: Massstab ist das Abo selbst (next_invoice_date),
+            # nicht der Kalendermonat - Plaene wie '2x im Jahr' sind sonst
+            # Fehlalarme. Rot nur bei ueberfaelligem Abo oder fehlendem Abo.
+            abos = vertrag_abos.get(p.id, [])
+            pausch = round(sum(a['total'] for a in abos), 2)
             invs = env['account.move'].search([
                 ('move_type', '=', 'out_invoice'), ('state', '=', 'posted'),
                 ('partner_id', 'child_of', p.id),
                 ('invoice_date', '>=', start), ('invoice_date', '<', ende)])
             gedeckt = round(sum(i.amount_untaxed_signed for i in invs), 2)
             vals.update({'x_klasse': 'vertrag', 'x_erwartet_eur': pausch,
-                         'x_gedeckt_eur': gedeckt,
-                         'x_delta_eur': round(gedeckt - pausch, 2)})
-            laufend = ende > today
-            if pausch <= 0:
+                         'x_gedeckt_eur': gedeckt})
+            ueberfaellig = [a for a in abos if a['next'] and a['next'] < today]
+            if not abos:
                 vals.update({'x_ampel': 'rot',
-                             'x_hinweis': 'Vertragskunde OHNE aktives Abo (%.2f h erfasst) - Pauschale pruefen!' % std})
-            elif gedeckt <= 0:
-                vals.update({'x_ampel': 'gelb' if laufend else 'rot',
-                             'x_hinweis': 'Vertragsrechnung fehlt (Pauschale %.2f EUR/Monat)' % pausch
-                                          + (' (Monat laeuft noch)' if laufend else '')})
-            elif gedeckt < pausch * 0.99:
-                vals.update({'x_ampel': 'gelb',
-                             'x_hinweis': 'Rechnung %.2f EUR unter Pauschale %.2f EUR' % (gedeckt, pausch)})
+                             'x_hinweis': 'Vertragskunde ohne aktives Abo in Odoo (%.2f h erfasst) - extern abgerechnet oder Abo anlegen' % std})
+            elif ueberfaellig:
+                a0 = ueberfaellig[0]
+                vals.update({'x_ampel': 'rot',
+                             'x_hinweis': 'Abo-Rechnung UEBERFAELLIG seit %s (%.2f EUR, Plan %s)'
+                                          % (a0['next'].strftime('%d.%m.%Y'), a0['total'], a0['plan'])})
             else:
-                vals.update({'x_ampel': 'gruen', 'x_hinweis': 'Vertrag fakturiert (%.2f h geleistet)' % std})
+                a0 = abos[0]
+                vals.update({'x_ampel': 'gruen',
+                             'x_hinweis': 'Vertrag ok - naechste Rechnung %s (Plan %s, %.2f h geleistet)'
+                                          % (a0['next'].strftime('%d.%m.%Y') if a0['next'] else '?', a0['plan'], std)})
         else:
             erwartet = round(std * SATZ, 2)
             invs = env['account.move'].search([
