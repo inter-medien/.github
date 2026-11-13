@@ -154,7 +154,7 @@ while d < m_ende:
     wochen.append((d.isocalendar()[1], ws, wend))
     d = we + datetime.timedelta(days=1)
 
-EMPDEF = {'wp': 0.0, 'wi': 0.0, 'mp': 0.0, 'mi': 0.0, 'abw': 0.0,
+EMPDEF = {'wp': 0.0, 'wi': 0.0, 'mp': 0.0, 'mpb': 0.0, 'mi': 0.0, 'abw': 0.0,
           'wpa': 0.0, 'mpa': 0.0, 'wfa': 0.0, 'mfa': 0.0}
 EMP = {}
 akt_kw = None
@@ -256,6 +256,8 @@ for s in env['planning.slot'].search([('start_datetime', '>=', str(m_start)),
         for e in s.employee_ids:
             em = EMP.setdefault(e.name, dict(EMPDEF))
             em['mp'] += anteil
+            if d <= heute:
+                em['mpb'] += anteil  # Plan bis einschliesslich heute (fairer Soll/Ist-Vergleich)
             if kwnr == akt_kw:
                 em['wp'] += anteil
     if st != 'nicht_abrechenbar':
@@ -556,7 +558,7 @@ if env.context.get('umsatzreport_mail'):
         erows = ''
         for en in sorted(EMP):
             em = EMP[en]
-            delta = em['mi'] - em['mp']
+            delta = em['mi'] - em['mpb']  # Ist vs. Plan BIS HEUTE, nicht ganzer Monat
             farbe = '#c62828' if delta < -2 else '#222222'
             erows += '<tr><td' + TDL + '>' + en + '</td>'
             for val in (em['wp'], em['wi'], em['mp'], em['mi']):
@@ -651,10 +653,10 @@ if env.context.get('umsatzreport_mail'):
             '<h3' + H3 + '>3 · Mitarbeiter (laufender Monat)</h3>'
             '<table style="border-collapse:collapse;font-size:13px;" cellspacing="0">'
             '<tr><th' + TH + '>Mitarbeiter</th><th' + THR + '>Woche Plan h</th><th' + THR + '>Woche Ist h</th>'
-            '<th' + THR + '>Monat Plan h</th><th' + THR + '>Monat Ist h</th><th' + THR + '>&#916; h</th>'
+            '<th' + THR + '>Monat Plan h</th><th' + THR + '>Monat Ist h</th><th' + THR + '>&#916; h bis heute</th>'
             '<th' + THR + '>Pause h W/M</th><th' + THR + '>Fahrt h W/M</th>'
             '<th' + THR + '>Abwesend h</th></tr>' + erows + '</table>'
-            '<p style="margin:4px 0 0;color:#666;">&#916; = Ist minus Plan im Monat; rot ab 2 h Rückstand. '
+            '<p style="margin:4px 0 0;color:#666;">&#916; = Ist minus Plan bis einschließlich heute (nicht Gesamtmonat); rot ab 2 h Rückstand. '
             'Plan aus der Einsatzplanung, Ist aus der Zeiterfassung (ohne Fahrt/intern). '
             'Pause = Stempeluhr-Anwesenheit minus gestempelte Arbeit · Fahrt = Zeiten auf Fahrt-Projekten · jeweils Woche / Monat.</p>'
 
