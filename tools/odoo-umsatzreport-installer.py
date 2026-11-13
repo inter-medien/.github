@@ -154,11 +154,17 @@ while d < m_ende:
     wochen.append((d.isocalendar()[1], ws, wend))
     d = we + datetime.timedelta(days=1)
 
+EMPDEF = {'wp': 0.0, 'wi': 0.0, 'mp': 0.0, 'mi': 0.0, 'abw': 0.0,
+          'wpa': 0.0, 'mpa': 0.0, 'wfa': 0.0, 'mfa': 0.0}
 EMP = {}
 akt_kw = None
+akt_ws = None
+akt_wend = None
 for (k, ws, wend) in wochen:
     if ws <= heute <= wend:
         akt_kw = k
+        akt_ws = ws
+        akt_wend = wend
 
 # --- Abwesenheiten (genehmigt + zur Genehmigung): Stunden je Woche, Tage je Mitarbeiter
 leaves = env['hr.leave'].search([('state', 'in', ['validate', 'confirm']),
@@ -191,7 +197,7 @@ for lv in leaves:
         if tot_wd:
             ABW[kwnr] = ABW.get(kwnr, 0.0) + std * n / tot_wd
             if lv.employee_id:
-                em = EMP.setdefault(lv.employee_id.name, {'wp': 0.0, 'wi': 0.0, 'mp': 0.0, 'mi': 0.0, 'abw': 0.0})
+                em = EMP.setdefault(lv.employee_id.name, dict(EMPDEF))
                 em['abw'] += std * n / tot_wd
 
 # --- Realisierungsquote aus den letzten 3 Monaten
@@ -248,7 +254,7 @@ for s in env['planning.slot'].search([('start_datetime', '>=', str(m_start)),
     if s.employee_ids:
         anteil = h / len(s.employee_ids)
         for e in s.employee_ids:
-            em = EMP.setdefault(e.name, {'wp': 0.0, 'wi': 0.0, 'mp': 0.0, 'mi': 0.0, 'abw': 0.0})
+            em = EMP.setdefault(e.name, dict(EMPDEF))
             em['mp'] += anteil
             if kwnr == akt_kw:
                 em['wp'] += anteil
@@ -269,6 +275,27 @@ for s in env['planning.slot'].search([('start_datetime', '>=', str(m_start)),
                 PROG[kl]['entfall'] += eur
             else:
                 PROG[kl]['zukunft'] += eur
+
+# --- Pausen aus den Anwesenheiten (Stempeluhr): Luecke zwischen erstem
+# Einstempeln und letztem Ausstempeln eines Tages minus gestempelter Arbeit.
+ATT = {}
+for att in env['hr.attendance'].search([('check_in', '>=', str(m_start)),
+                                        ('check_in', '<', str(m_ende))]):
+    if not att.employee_id or not att.check_in or not att.check_out:
+        continue
+    ak = (att.employee_id.name, att.check_in.date())
+    ATT.setdefault(ak, []).append((att.check_in, att.check_out))
+for (ename, atag), paare in ATT.items():
+    erster = min(pp[0] for pp in paare)
+    letzter = max(pp[1] for pp in paare)
+    arbeit_s = sum((pp[1] - pp[0]).total_seconds() for pp in paare)
+    pause_h = max(0.0, (letzter - erster).total_seconds() - arbeit_s) / 3600.0
+    if pause_h <= 0.01:
+        continue
+    em = EMP.setdefault(ename, dict(EMPDEF))
+    em['mpa'] += pause_h
+    if akt_ws and akt_ws <= atag <= akt_wend:
+        em['wpa'] += pause_h
 
 # --- Fakturiert: gebuchte Ausgangsrechnungen (inkl. Gutschriften) mit
 # Rechnungsdatum im laufenden Monat – unabhängig von der Planung. Faengt
@@ -303,7 +330,15 @@ for l in env['account.analytic.line'].search([('date', '>=', str(m_start)),
                                               ('date', '<', str(m_ende)),
                                               ('employee_id', '!=', False)]):
     pn = (l.project_id.name or '').lower()
-    if 'intern' in pn or 'fahrt' in pn:
+    if 'fahrt' in pn:
+        # Fahrzeiten je Mitarbeiter mitzaehlen (fliessen nicht in Plan/Ist)
+        if l.employee_id:
+            em = EMP.setdefault(l.employee_id.name, dict(EMPDEF))
+            em['mfa'] += l.unit_amount or 0.0
+            if akt_ws and akt_ws <= l.date <= akt_wend:
+                em['wfa'] += l.unit_amount or 0.0
+        continue
+    if 'intern' in pn:
         continue
     if l.planning_slot_id and l.planning_slot_id.x_ist_erstgespraech:
         continue
@@ -323,7 +358,7 @@ for l in env['account.analytic.line'].search([('date', '>=', str(m_start)),
     w = W.setdefault(key, {'plan_h': 0.0, 'plan_eur': 0.0, 'abr_h': 0.0, 'abr_eur': 0.0, 'ist_h': 0.0})
     w['ist_h'] += l.unit_amount or 0.0
     if l.employee_id:
-        em = EMP.setdefault(l.employee_id.name, {'wp': 0.0, 'wi': 0.0, 'mp': 0.0, 'mi': 0.0, 'abw': 0.0})
+        em = EMP.setdefault(l.employee_id.name, dict(EMPDEF))
         em['mi'] += l.unit_amount or 0.0
         if kwnr == akt_kw:
             em['wi'] += l.unit_amount or 0.0
@@ -528,9 +563,13 @@ if env.context.get('umsatzreport_mail'):
                 erows += '<td' + TD + '>' + ('%.1f' % val).replace('.', ',') + '</td>'
             erows += ('<td' + TD + ' ><span style="color:' + farbe + ';">'
                       + ('%+.1f' % delta).replace('.', ',') + '</span></td>')
+            erows += ('<td' + TD + '>' + ('%.1f' % em['wpa']).replace('.', ',')
+                      + ' / ' + ('%.1f' % em['mpa']).replace('.', ',') + '</td>')
+            erows += ('<td' + TD + '>' + ('%.1f' % em['wfa']).replace('.', ',')
+                      + ' / ' + ('%.1f' % em['mfa']).replace('.', ',') + '</td>')
             erows += '<td' + TD + '>' + (('%.1f' % em['abw']).replace('.', ',') if em['abw'] > 0.05 else '–') + '</td></tr>'
         if not erows:
-            erows = '<tr><td' + TDL + ' colspan="7">Keine Daten</td></tr>'
+            erows = '<tr><td' + TDL + ' colspan="9">Keine Daten</td></tr>'
 
         # --- Block 4: Prognose + Fakturiert
         prows = ''
@@ -613,9 +652,11 @@ if env.context.get('umsatzreport_mail'):
             '<table style="border-collapse:collapse;font-size:13px;" cellspacing="0">'
             '<tr><th' + TH + '>Mitarbeiter</th><th' + THR + '>Woche Plan h</th><th' + THR + '>Woche Ist h</th>'
             '<th' + THR + '>Monat Plan h</th><th' + THR + '>Monat Ist h</th><th' + THR + '>&#916; h</th>'
+            '<th' + THR + '>Pause h W/M</th><th' + THR + '>Fahrt h W/M</th>'
             '<th' + THR + '>Abwesend h</th></tr>' + erows + '</table>'
             '<p style="margin:4px 0 0;color:#666;">&#916; = Ist minus Plan im Monat; rot ab 2 h Rückstand. '
-            'Plan aus der Einsatzplanung, Ist aus der Zeiterfassung.</p>'
+            'Plan aus der Einsatzplanung, Ist aus der Zeiterfassung (ohne Fahrt/intern). '
+            'Pause = Stempeluhr-Anwesenheit minus gestempelte Arbeit · Fahrt = Zeiten auf Fahrt-Projekten · jeweils Woche / Monat.</p>'
 
             '<h3' + H3 + '>4 · Monats-Prognose &amp; Fakturierung</h3>'
             '<table style="border-collapse:collapse;font-size:13px;" cellspacing="0">'
