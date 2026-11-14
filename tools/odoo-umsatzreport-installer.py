@@ -574,7 +574,7 @@ if env.context.get('umsatzreport_mail'):
                   + ('%.2f' % v_sum).replace('.', ',') + ' €</td></tr>')
 
         # --- Block 1b: Vertragskunden-Check (Abo-Faelligkeit)
-        vrows = ''
+        vkrows = ''
         vk_problem = 0
         for (vname, abos, vstd, rg_daten) in sorted(VERTRAG):
             if not abos:
@@ -611,7 +611,7 @@ if env.context.get('umsatzreport_mail'):
                     vk_problem += 1
                 else:
                     status = '<span style="color:#1b7a38;">ok</span>'
-            vrows += ('<tr><td' + TDL + '>' + vname + '</td><td' + TDL + '>' + plan_txt + '</td>'
+            vkrows += ('<tr><td' + TDL + '>' + vname + '</td><td' + TDL + '>' + plan_txt + '</td>'
                       '<td' + TD + '>' + pausch_txt + '</td><td' + TD + '>' + next_txt + '</td>'
                       '<td' + TDL + '>' + status + '</td></tr>')
         if VERTRAG:
@@ -619,7 +619,7 @@ if env.context.get('umsatzreport_mail'):
                 '<table style="border-collapse:collapse;font-size:13px;" cellspacing="0">'
                 '<tr><th' + TH + '>Vertragskunde</th><th' + TH + '>Plan</th>'
                 '<th' + THR + '>Betrag/Zyklus</th><th' + THR + '>Nächste Rechnung</th><th' + TH + '>Status</th></tr>'
-                + vrows + '</table>'
+                + vkrows + '</table>'
                 + ('<p style="margin:4px 0 0;color:#c62828;">&#9888; ' + str(vk_problem)
                    + ' Vertragskunde(n) überfällig oder ohne Abo trotz laufender Stunden.</p>' if vk_problem else
                    '<p style="margin:4px 0 0;color:#1b7a38;">Alle Verträge im Rhythmus.</p>'))
@@ -629,6 +629,9 @@ if env.context.get('umsatzreport_mail'):
         # --- Block 2: Wochen im Detail
         wrows = ''
         for (label, wpk, wgw, g, abw, akt) in mail_wochen:
+            # Wochen ohne jede Zahl (z.B. 1-Tages-Randwochen) weglassen - nur Rauschen
+            if not akt and abs(g['plan_h']) < 0.05 and abs(g['ist_h']) < 0.05 and abs(g['abr_h']) < 0.05 and abw < 0.05:
+                continue
             for kl_label, w, extra in (('§45b', wpk, ''), ('Übrige', wgw, ''),
                                        ('Gesamt', g, 'font-weight:bold;background:#eef2f7;')):
                 hl = 'background:#fff8dc;' if (akt and not extra) else ''
